@@ -1,0 +1,589 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg version="1.1" id="svg-root" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" x="0px" y="0px"
+	viewBox="0 0 818.8 507" style="enable-background:new 0 0 818.8 507;" xml:space="preserve">
+
+<defs>
+<script type="text/ecmascript"><![CDATA[
+/**
+ * Отвечает за генерацию SVG-элементов (<g> и <circle>),
+ * их добавление в DOM и удаление.
+ */
+class SVGMarkerManager {
+    constructor(containerId) {
+        this.containerId = containerId;
+        this.ns = "http://www.w3.org/2000/svg";
+    }
+
+    get container() {
+        return document.getElementById(this.containerId);
+    }
+
+    /**
+     * Создает SVG-группу с маркерами, добавляет её в контейнер маркеров
+     */
+    createMarker(x, y, markerId, onAttachHandlers) {
+        const markerContainer = this.container;
+        if (!markerContainer) return;
+
+        const markerGroup = document.createElementNS(this.ns, "g");
+        markerGroup.setAttribute("id", markerId);
+        markerGroup.setAttribute("data-id", markerId);
+        markerGroup.setAttribute("data-type", "damage_marker");
+        markerGroup.setAttribute("style", "cursor: pointer;");
+
+        const circle = document.createElementNS(this.ns, "circle");
+        circle.setAttribute("cx", x);
+        circle.setAttribute("cy", y);
+        circle.setAttribute("r", "11");
+        circle.setAttribute("fill", "#FF0000");
+        circle.setAttribute("stroke", "#FFFFFF");
+        circle.setAttribute("stroke-width", "2.5");
+        circle.setAttribute("data-type", "damage_marker");
+        circle.setAttribute("data-id", markerId);
+
+        markerGroup.appendChild(circle);
+        markerContainer.appendChild(markerGroup);
+
+        if (typeof onAttachHandlers === "function") {
+            onAttachHandlers(markerGroup);
+            onAttachHandlers(circle);
+        }
+    }
+
+    /**
+     * Удаляет маркер из DOM по ID.
+     */
+    removeMarker(markerId) {
+        const markerElement = document.getElementById(markerId);
+        if (markerElement) {
+            markerElement.parentNode.removeChild(markerElement);
+        }
+    }
+
+    /**
+     * Полная очистка всех маркеров на схеме.
+     */
+    clearAll() {
+        const markerContainer = this.container;
+        if (markerContainer) markerContainer.innerHTML = "";
+    }
+
+    /**
+     * Отрисовка массива переданных 2D маркеров.
+     */
+    highlightMarker(markers, onAttachHandlers) {
+        this.clearAll();
+        if (!markers) return;
+
+        let parsed = typeof markers === 'string' ? JSON.parse(markers) : markers;
+        if (!Array.isArray(parsed)) parsed = [parsed];
+
+        parsed.forEach(data => {
+            if (!data || data.x === undefined || data.y === undefined) return;
+            const id = data.id || `marker_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+            this.createMarker(parseFloat(data.x), parseFloat(data.y), id, onAttachHandlers);
+        });
+    }
+}
+
+/**
+ * Отвечает за поиск деталей на SVG-панели и определение их родительских групп.
+ */
+class SVGModelManager {
+    constructor(rootId) {
+        this.root = document.getElementById(rootId);
+    }
+
+    /**
+     * Ищет элемент детали на SVG по строковому имени.
+     */
+    findPart(partName) {
+        if (!partName) return null;
+        return this.root.querySelector(`[id^="${partName}"]`) ||
+            this.root.querySelector(`[id*="${partName}"]`);
+    }
+
+    /**
+     * Ищет ID детали вверх по DOM-дереву от места клика.
+     */
+    findPartId(targetElement) {
+        let currentEl = targetElement;
+        while (currentEl && currentEl !== this.root) {
+            if (currentEl.id &&
+                !currentEl.id.startsWith("line-") &&
+                currentEl.id !== "lines" &&
+                !currentEl.id.startsWith("marker_")) {
+                return {id: currentEl.id, element: currentEl};
+            }
+            currentEl = currentEl.parentNode;
+        }
+        return null;
+    }
+}
+
+/**
+ * Принимает нормализованные координаты куба (nx, ny, nz) и проецирует их.
+ */
+class SVGProjector {
+    /**
+     * Проецирует трехмерную точку повреждения на плоскость 2D
+     * @param {Object} damage - Объект повреждения из 3D
+     * @param {SVGElement} svgPart - Найденный SVG элемент детали
+     */
+    static project3DTo2D(damage, svgPart) {
+        const parentGroup = svgPart.closest("g");
+        if (!parentGroup) {
+            console.warn("Parent group not found for part:", damage.partName);
+            return null;
+        }
+
+        const groupId = parentGroup.id.toLowerCase();
+        const bbox = parentGroup.getBBox();
+
+        let exactX = 0;
+        let exactY = 0;
+
+        if (groupId.includes("top")) {
+            exactX = bbox.x + (1 - damage.nz) * bbox.width;
+            exactY = bbox.y + damage.nx * bbox.height;
+        } else if (groupId.includes("right")) {
+            exactX = bbox.x + (1 - damage.nz) * bbox.width;
+            exactY = bbox.y + damage.ny * bbox.height;
+        } else if (groupId.includes("left")) {
+            exactX = bbox.x + (1 - damage.nz) * bbox.width;
+            exactY = bbox.y + (1 - damage.ny) * bbox.height;
+        } else if (groupId.includes("front")) {
+            exactX = bbox.x + damage.ny * bbox.width;
+            exactY = bbox.y + damage.nx * bbox.height;
+
+            if (/(light|grille)/i.test(damage.partName)) {
+                exactX += 20;
+            }
+
+        } else if (groupId.includes("back")) {
+            exactX = bbox.x + damage.ny * bbox.width;
+            exactY = bbox.y + damage.nx * bbox.height;
+
+            if (/(light|trunklid)/i.test(damage.partName)) {
+                exactX -= 30;
+            }
+
+        } else {
+            console.warn("Unknown SVG view group orientation:", groupId);
+            return null;
+        }
+
+        return {
+            id: damage.id,
+            x: parseFloat(exactX.toFixed(2)),
+            y: parseFloat(exactY.toFixed(2))
+        };
+    }
+}
+
+let modelManager, markerManager;
+let pressedElement = null;
+let pointerDownPos = {x: 0, y: 0};
+
+const touchHighlightEffect = "0.3";
+
+document.addEventListener("DOMContentLoaded", () => {
+    modelManager = new SVGModelManager("svg-root");
+    markerManager = new SVGMarkerManager("markers-container");
+
+    attachTouchHandlers();
+    initClickContainer();
+});
+
+/**
+ * Вызывается нативной стороной для переноса точек из 3D в 2D.
+ */
+function load3DDamageToSVG(jsonFrom3D) {
+    try {
+        const damages = typeof jsonFrom3D === "string" ? JSON.parse(jsonFrom3D) : jsonFrom3D;
+        const markersForSVG = [];
+
+        damages.forEach(damage => {
+            const has3DCords = damage.nx !== undefined && damage.ny !== undefined &&
+                damage.nz !== undefined && (damage.nx !== 0 || damage.ny !== 0 || damage.nz !== 0);
+
+            if (!has3DCords) {
+                if (damage.x !== undefined && damage.y !== undefined) {
+                    markersForSVG.push({id: damage.id,
+                                        x: parseFloat(damage.x),
+                                        y: parseFloat(damage.y)});
+                }
+                return;
+            }
+
+            const svgPart = modelManager.findPart(damage.partName);
+            if (!svgPart) {
+                console.warn("SVG part not found in DOM:", damage.partName);
+                return;
+            }
+
+            const projectedPoint = SVGProjector.project3DTo2D(damage, svgPart);
+            if (projectedPoint) {
+                markersForSVG.push(projectedPoint);
+            }
+        });
+
+        if (markersForSVG.length > 0) {
+            highlightDamagedParts(markersForSVG);
+        }
+
+    } catch (error) {
+        console.error("Projection error 3D to SVG:", error);
+    }
+}
+
+/**
+ * Сканирует документ и вешает события pointerdown на все интерактивные детали схемы.
+ */
+function attachTouchHandlers() {
+    const elements = document.querySelectorAll("[id]");
+    elements.forEach(el => {
+        if (el.id === "svg-root" ||
+            el.id === "lines" ||
+            el.id === "markers-container" ||
+            el.id.startsWith("line-")) return;
+        attachTouchHandlersToElement(el);
+    });
+}
+
+function attachTouchHandlersToElement(el) {
+    if (!el) return;
+
+    el.addEventListener("pointerdown", (e) => {
+        pressedElement = e.target;
+        pointerDownPos = {x: e.clientX, y: e.clientY};
+
+        if (pressedElement.id?.startsWith("marker_") === false &&
+            pressedElement.getAttribute("data-type") !== "damage_marker") {
+            pressedElement.style.opacity = touchHighlightEffect;
+        }
+    });
+
+    const resetOpacity = () => {
+        if (pressedElement) {
+            if (pressedElement.id?.startsWith("marker_") === false &&
+                pressedElement.getAttribute("data-type") !== "damage_marker") {
+                pressedElement.style.opacity = "1.0";
+            }
+            pressedElement = null;
+        }
+    };
+
+    el.addEventListener("pointerleave", resetOpacity);
+    el.addEventListener("pointercancel", resetOpacity);
+}
+
+/**
+ * Инициализация глобального контейнера кликов.
+ */
+function initClickContainer() {
+    const svgRoot = modelManager.root;
+
+    svgRoot.addEventListener("pointerup", (e) => {
+        if (!pressedElement) return;
+
+        const moveDistance = Math.hypot(e.clientX - pointerDownPos.x, e.clientY - pointerDownPos.y);
+        if (moveDistance > 8) {
+            pressedElement = null;
+            return;
+        }
+
+        const clickedTarget = e.target;
+
+        if (clickedTarget.getAttribute("data-type") === "damage_marker" ||
+            clickedTarget.id?.startsWith("marker_") ||
+            clickedTarget.parentNode?.getAttribute("data-type") === "damage_marker") {
+
+            const markerGroup = clickedTarget.closest("g[data-type='damage_marker']") ||
+                (clickedTarget.id?.startsWith("marker_") ? clickedTarget : null);
+
+            if (markerGroup) {
+                const markerId = markerGroup.id || markerGroup.getAttribute("data-id");
+                if (markerId) {
+                    markerManager.removeMarker(markerId);
+
+                    if (typeof elementClicked !== "undefined" && elementClicked.postMessage) {
+                        elementClicked.postMessage(JSON.stringify({action: "marker_removed",
+                                                                   id: markerId}));
+                    }
+                }
+            }
+            pressedElement = null;
+            e.stopPropagation();
+            return;
+        }
+
+        if (pressedElement && pressedElement.id?.startsWith("marker_") === false
+            && pressedElement.getAttribute("data-type") !== "damage_marker") {
+            pressedElement.style.opacity = "1.0";
+        }
+
+        const part = modelManager.findPartId(clickedTarget);
+        if (!part || part.id === "svg-root") {
+            pressedElement = null;
+            return;
+        }
+
+        const cleanPartName = part.id.split("-")[0];
+
+        const point = svgRoot.createSVGPoint();
+        point.x = e.clientX;
+        point.y = e.clientY;
+        const svgP = point.matrixTransform(svgRoot.getScreenCTM().inverse());
+
+        const parentGroup = part.element.closest("g");
+        let viewType = "unknown";
+        let nx_2d = 0, ny_2d = 0;
+
+        if (parentGroup?.id) {
+            const groupId = parentGroup.id.toLowerCase();
+            const bbox = parentGroup.getBBox();
+
+            nx_2d = (svgP.x - bbox.x) / bbox.width;
+            ny_2d = (svgP.y - bbox.y) / bbox.height;
+
+            if (groupId.includes("top")) viewType = "top";
+            else if (groupId.includes("right")) viewType = "right";
+            else if (groupId.includes("left")) viewType = "left";
+            else if (groupId.includes("front")) viewType = "front";
+            else if (groupId.includes("back")) viewType = "back";
+        }
+
+        const newMarkerId = `marker_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+
+        const eventData = {
+            action: "marker_added",
+            id: newMarkerId,
+            partName: cleanPartName,
+            x: parseFloat(svgP.x.toFixed(2)),
+            y: parseFloat(svgP.y.toFixed(2)),
+            z: 0.0,
+            nx_2d: nx_2d,
+            ny_2d: ny_2d,
+            viewType: viewType
+        };
+
+        if (typeof elementClicked !== "undefined" && elementClicked.postMessage) {
+            elementClicked.postMessage(JSON.stringify(eventData));
+        }
+
+        markerManager.createMarker(svgP.x, svgP.y, newMarkerId, attachTouchHandlersToElement);
+        pressedElement = null;
+    });
+}
+
+function highlightDamagedParts(markers) {
+    markerManager.highlightMarker(markers, attachTouchHandlersToElement);
+}
+
+window.load3DDamageToSVG = load3DDamageToSVG;
+window.highlightDamagedParts = highlightDamagedParts;
+window.clearAllMarkers = () => markerManager.clearAll();
+window.removeMarkerById = (id) => markerManager.removeMarker(id);
+]]></script>
+</defs>
+<style type="text/css">
+	.st0{fill:#FFFFFF;stroke:#000000;stroke-width:0.5;stroke-miterlimit:10;}
+	.st1{fill:#919798;stroke:#000000;stroke-width:0.5;stroke-miterlimit:10;}
+	.st2{fill:#FFFFFF;stroke:#000000;stroke-miterlimit:10;}
+	.st3{fill:#EAEAEA;stroke:#000000;stroke-width:0.5;stroke-miterlimit:10;}
+	.st4{fill:#4C4C4C;stroke:#000000;stroke-width:0.5;stroke-miterlimit:10;}
+	.st5{fill:none;stroke:#000000;stroke-width:0.5;stroke-miterlimit:10;}
+	.st6{stroke:#565656;stroke-width:2;stroke-miterlimit:10;}
+</style>
+<g id="Coupe_Top">
+	<path id="Hood_00000022526171035418342570000009374596544433860016_" class="st0" d="M257.7,158.6c-27.6,64.5-28.7,127.5,0,188.8
+		l-2.6,7.7l-14.4,6.7l-111.2-3l-41.3-33c-12-51.1-14-99.4,0-142.9L130,149l108.3-4.1l16.2,7.4L257.7,158.6z"/>
+	<path id="Windshield_00000072280127717710198210000015807530915498514315_" class="st1" d="M257.7,158.6l94.7,20.3
+		c-17.4,48.5-16.6,98.3,0,149.1l-94.7,19.3C229.5,289.1,228.9,226.3,257.7,158.6z"/>
+	<path id="Roof_00000031202769921469230920000012924567163399238586_" class="st0" d="M561.7,183.2c-2.9,46.9-2.9,93.9,0,141
+		c-81.9-1.9-160.1-2.8-209.2,3.8c-15.8-50.6-18.1-100.5,0-149.1C412.6,185.5,484.5,185.5,561.7,183.2z"/>
+	<path id="RearWindshield_00000078767023019265382440000007082256708873984676_" class="st1" d="M630.5,171.8l-68.8,11.4
+		c-3.4,44.2-3.1,91.5,0,141l68.8,12.2C652.5,280.7,652.5,225.8,630.5,171.8z"/>
+	<path id="TrunkLid_00000093881472508637927170000012379703092280974219_" class="st0" d="M639.4,167.2l-8.9,4.6
+		c22.1,54.6,21.9,109.4,0,164.6l8.9,3.5l53.1-6.8c15.9-57,17.5-110.3,1.4-158.9L639.4,167.2z"/>
+</g>
+<g id="Coupe_Front">
+	<path id="FrontBumper_00000040572616067613645310000007972258677742116775_" class="st2" d="M77.4,179.5l-1.2,5.6L63.8,189
+		c-11.8,3.7-20.1,14.2-21.1,26.5c-1.9,25.1-2,49.9,0.1,74.4c0.9,11.1,7.8,20.8,18,25.3l15.3,6.7l1.2,5.3L52,317.4
+		c0.1,31.8,10.7,42.2,20.8,47.3l-4.7,10.6l-57.5-8.7L8,367.8l-6.5-4.3l1.8-30.2c10.6-7.3,19.5-17.7,27-30.5l0.4-99.3
+		c-9.4-14.1-19.2-24.7-29.2-30.5v-29.2l7.1-4.3l2.6,1.6l56.7-8.5l4.8,8.7c-13.5,4.9-20.4,19.2-20.8,47.3L77.4,179.5z"/>
+	<path id="FrontBumperGrille_00000041975237799224195140000015481119180109491875_" class="st3" d="M28.4,331.3l5.8,23.7l-3.2,9.3
+		H11l1.8-20.9c0.3-4,2.6-7.5,6-9.6l6.5-3.9C26.5,329.3,28,329.9,28.4,331.3z"/>
+	<path id="Grille_00000137830892532459858700000006928536742703418021_" class="st3" d="M76.2,185.1c3.2,44.7,3.3,90.3,0,136.9
+		l-16.8-6.2c-9.3-3.4-15.7-12-16.4-21.9c-2-28.7-2.3-56.1-0.4-81.9c0.8-10.4,8-19.2,18-22.2L76.2,185.1z"/>
+	<path id="FrontBumperGrille_00000012463720168984339630000000806964569419451532_" class="st3" d="M28.4,176.6l5.8-23.7l-3.2-9.3
+		H11l1.8,20.9c0.3,4,2.6,7.5,6,9.6l6.5,3.9C26.5,178.6,28,178,28.4,176.6z"/>
+	<path id="FrontBumperGrille_00000110470602574724815280000012141280456099729849_" class="st3" d="M1.6,173.2
+		c10.6,6.4,20.3,16.8,29.2,30.5L30.4,303c-7.8,13.6-17,23.2-27,30.5L1.6,173.2z"/>
+	<path id="RightHeadlight_00000057834044819132840560000000308745658831683206_" class="st3" d="M72.9,141.5l13.3-4.6l8.1,4.6
+		c-1.3,12.6-6.9,25.3-16.9,38l-25.3,9.3C51.7,163.1,58.3,146.9,72.9,141.5z"/>
+	<path id="LeftHeadlight_00000000208617646315612700000011361125057354616472_" class="st3" d="M72.9,364.7l13.3,4.6l8.1-4.6
+		c-1.3-12.6-6.9-25.3-16.9-38l-25.3-9.3C51.7,343.1,58.3,359.4,72.9,364.7z"/>
+</g>
+<g id="Coupe_Back">
+	<path id="TrunkLid_00000115484732402490715660000001813507623167083930_" class="st0" d="M711.3,176.3c0.1-0.9,1.2-1.5,2-1
+		l12.1,7.2l14.1,8.3c7.5,4.4,12.7,12.1,13.9,20.7c3.4,25.3,2.4,53.5-0.8,83.2c-0.9,8.4-5.5,16-12.5,20.7l-16.2,10.9
+		c0,0-0.1,0-0.1,0.1l-10.3,5.9c-0.8,0.5-1.8,0-2-1C704,281.3,704.2,229.6,711.3,176.3z"/>
+	<path id="RightTailLight_00000158746990790021315220000016230624451575124371_" class="st3" d="M748.6,187.4l-23-15.6
+		c-3.1-1.5-5.9-3.1-8.5-4.9c-3.2-2.2-4.4-6.5-2.6-10c1.8-3.6,3.7-6.8,5.4-9.1c0.5-0.7,1.3-1.2,2.2-1.4c4-0.8,8.7-0.2,13.8,1.4
+		C748.5,152.7,752.5,166.1,748.6,187.4z"/>
+	<path id="LeftTailLight_00000161609323554042946710000017353856003349145737_" class="st3" d="M750.8,318.8l-26,16.5
+		c-3.1,1.6-5.9,3.4-8.3,5.5c-1.8,1.6-2.5,4.1-1.7,6.4l2.6,8.1c1.1,3.4,4.4,5.7,8,5.3c4.7-0.4,9.1-1.6,13.5-3.1
+		C748.2,355.6,751.1,340.7,750.8,318.8z"/>
+	<path id="RearBumper_00000127018292988400986480000001938543825759320763_" class="st0" d="M725.6,171.8l-2,9.6l13.6,8.4
+		c8.8,5.4,14.7,14.5,15.9,24.8c3,25.4,2.8,51.5-0.2,78.1c-1.2,10.2-6.8,19.3-15.5,24.8l-13.8,8.8l1.1,9l26-16.5
+		c0.3,22.2-2.8,37-11.9,38.7c6.8,4.6,12.9,10,16.5,17.9l20-2.7l27.6-7l14.6-21.4V156.1l-16-16.2l-31-6.2l-16.3-1.4
+		c-3,6.8-10,11.6-18.4,15.7c12.6,4.7,16.6,18.1,12.7,39.4L725.6,171.8z"/>
+</g>
+<g id="Coupe_Side_Left">
+	<path id="LeftQuarterPanel_00000007404066011060258950000017653890786534027449_" class="st0" d="M431.3,326.7v-5.2
+		c56.3,0.5,111.2,3.9,158.6,22.7l73.7,27.8l39.2,7.1c3.7,3.7,7,8.1,9.5,13.6l-5.3,1.2c-1.8-4-4.6-7.6-9.7-10.2
+		c-17.6-3.8-28.6-2.4-32.1,5.1c3.8,4.9,13.7,10.9,25,17.1l-25,11l-49.7,7.3c-13.3-10.2-29.7-14.5-52-7.3
+		c-22.2,12.4-27,30.8-30.9,49.5l-101.3,1.8V326.7z"/>
+	<path id="LeftFender_00000039112419057062119100000014533620883633932954_" class="st0" d="M255.1,382.5l-14.4,4.3l-95,14.4v2.4
+		l-7.1,9.1l17.3,4.1l7.1,2c12.6-5.8,26.3-6.9,41.4-2c20.8,9.4,32.8,26.7,33.9,54h35.1c-2.5-23.8-2.9-47.9-2.4-72.7
+		c0.9-5.4,3-9.7,5.9-13.4l9.9-9.3l-10.6-1.2l-6.9,5.3l-12.4,0.6L255.1,382.5z"/>
+	<path id="LeftFrontDoor_00000003075518454497775270000007904771372815882888_" class="st0" d="M457,326.6l-10.2,52.5L443,398
+		c-2.4,30.8-5.5,63.3,1.4,70.4l-170.9,2.4c-2.3-24.1-3.1-48.3-2.4-72.7c0.8-5,2.8-9.4,5.9-13.4l9.9-9.3
+		C326.8,331.8,406.7,325.7,457,326.6z"/>
+	<path id="RearLeftDoorWindow_00000045583977612911296760000015092003087559243711_" class="st1" d="M570.2,373.6
+		c-16.7-22.4-45.2-36.8-105.3-41.8l-7.9,41.8H570.2z"/>
+	<path id="FrontLeftDoorWindow_00000068670488299335106820000003461120463767070093_" class="st1" d="M446,329.7l-12.2,44.5
+		l-126.9,6.1v-12C342.3,342.1,403.9,328.9,446,329.7z"/>
+	<path id="LeftFrontStruts_00000181775988940834175960000004510992174021547423_" class="st0" d="M276.2,374.2
+		c53.5-41,94.8-54.6,155-52.8v5.2c-59.4,2.1-98,17.4-144.5,48.8L276.2,374.2z"/>
+	<path id="LeftTailLight_00000115480537886441004850000008303892951750912407_" class="st3" d="M721.1,415.4L707,393.9
+		c-2.6-4.8-5.6-8.5-9.7-10.2c-18.1-4-28.4-2.1-32.1,5.1c4.9,5.6,14.1,11.3,25,17.1C701.7,411.2,712.4,415.1,721.1,415.4z"/>
+	<path id="TrunkLid_00000114780156192523906750000015661767875325153155_" class="st0" d="M630.5,359.5l31.7,5.6l52.6,8.5l8.9,14.6
+		l-3.5,3c0.2,7.6,1.4,15.3,3.5,23.1l-2.5,1L707,393.9l5.3-1.2c-2.4-5.2-5.6-9.7-9.5-13.6l-39.2-7.1L630.5,359.5z"/>
+	<path id="RearBumper_00000097483983643682022800000011583481578664414094_" class="st0" d="M615.4,424.1
+		c14.8,13.4,21.6,32.4,22.9,55.2l54.8-6.5c0,0,17.3-0.9,25.3-10.8s15.2-11.5,15.2-11.5l0.1-21.3c-4.2-4.2-7.5-9.1-10-14.7l-2.5,1
+		c-10.3-0.5-20.6-4.8-31-9.5l-25,11L615.4,424.1z"/>
+	<path id="FrontBumper_00000029046717593480191720000010378888236719509895_" class="st0" d="M138.6,412.8
+		c-14.6,10-30.9,17.4-49.1,22.1l-2.6-2c5.1-9.9,10.2-19.4,14.8-24.4l-6.5,1l-14.5,31.3c-0.5,1.1-1.3,1.9-2.4,2.3l-4.2,2.2v8.7h2.3
+		c2.6,0,4.8,1.7,5.5,4.2l3.9,14.7l-7.1,3.1c-0.5,0.2-0.5,0.9,0,1.2l5.1,2.1c10.2,2.8-5.3,8.9,51,8.9c-2.5-36,7.2-58.7,28.2-69.2
+		L138.6,412.8z"/>
+	<path id="LeftHeadlight_00000119831679074313774400000002311566574773427858_" class="st3" d="M145.7,401.2l-44.1,7.3
+		c-5.4,6.4-10.2,15-14.8,24.4l2.6,2c21.1-5.6,36.5-13.4,49.1-22.1l7.1-9.1L145.7,401.2L145.7,401.2z"/>
+	<path id="Windshield_00000121251861888642224900000006032806385733480372_" class="st1" d="M385.1,323.7
+		c-42.3,6.4-91.4,20-133.3,54.6c1.4,0.5,5,1.7,5,1.7l12.5-0.6C324.5,336.3,356,328.3,385.1,323.7z"/>
+	<path id="Hood_00000031901381501670027170000016197016261587169677_" class="st0" d="M256.9,380.1L248,377
+		c0,0-116.4,8.4-158.3,26.7c1.4,0.3,2.6,0.7,3.6,1.1c2,0.7,2.8,3,1.9,4.8l0,0l6.5-1l44.1-7.3l95-14.4l14.4-4.3L256.9,380.1z"/>
+	<path id="Grille_00000060741721833201103130000017274676368270946212_" class="st3" d="M74,445.3l-0.3-1.9
+		c-0.3-1.8-0.2-3.7,0.3-5.4l8.9-29.5l0.6-1.2c1.2-2.3,3.5-3.7,6.1-3.7l0,0l3,0.9c2.1,0.6,3.3,2.9,2.5,5l0,0l-14.5,31.3l-1.9,2.1
+		L74,445.3z"/>
+	<path id="FrontBumperGrille_00000015331861455898439100000014165657325502833033_" class="st3" d="M74,454l4.6,21.9l7.1-3.1
+		l-3.9-14.7l0,0c-0.8-2.5-3.1-4.2-5.7-4.2H74V454z"/>
+	<path id="FrontBumperGrille_00000155104771810285045260000004186610335845940411_" class="st3" d="M92.9,457.5
+		c0,0,17.2-10.5,21.8-7.6c4.7,2.8,9.5,18.5,7.7,20.9s-1.2,1.9-1.2,1.9l-16.7-0.5l0,0c-3.9-0.2-7.2-2.7-8.6-6.3L92.9,457.5z"/>
+	<path id="RearWindshield_00000005959605282307786310000011887924800855325608_" class="st1" d="M548.9,331.8L548.9,331.8
+		c23.7,3.2,53,10.5,65.4,15.1c18.6,7,18.6,7.2,39,16.6l-22.9-4C601.1,347.9,568.1,334.6,548.9,331.8z"/>
+	<path id="LeftRockerPanels_00000131341989090090328460000014933702201667428279_" class="st0" d="M532.6,466.4v17.3
+		c-82-1.5-183.9-1.2-294.4,0v-12.8h35.1l145.1-2.4l107.2-2.5L532.6,466.4z"/>
+	<path id="LeftMirrorGlass_00000183225823825626907540000012850994601221039021_" class="st0" d="M299,375.4c0,0-4.6,1.4-4.5,3
+		s2.3,1.8,2.3,1.8H324c0,0,2.8-2.4,2.8-8.9s-6.7-9.3-6.7-9.3h-7.7C305,362,299,368,299,375.4L299,375.4z"/>
+	<circle id="LeftFrontTier_00000152978163895052163330000003878110720769622677_" class="st4" cx="185.7" cy="462.2" r="44.8"/>
+	<circle id="LeftFrontWheelRim_00000045589380674259641450000007570696754039506563_" class="st0" cx="186.3" cy="462.2" r="34.9"/>
+	<circle id="LeftRearTier_00000092456805869675802750000001210485281694491039_" class="st4" cx="584.1" cy="461.1" r="44.8"/>
+	<circle id="LeftRearWheelRim_00000023993793529891954710000006974500064267339157_" class="st0" cx="584.6" cy="461" r="34.9"/>
+	<path id="LeftFrontDoorHandle_00000047043931232678174010000016564285482054065556_" class="st1" d="M436.2,393.2h-20.9
+		c-1.5,0-2.8-1.2-2.8-2.8v-0.3c0-1.5,1.2-2.8,2.8-2.8h20.9c1.5,0,2.8,1.2,2.8,2.8v0.3C438.9,392,437.7,393.2,436.2,393.2z"/>
+</g>
+<g id="Coupe_Side_Right">
+	<g id="Sedan_Side_Right_00000027570810186355271850000014175151615517328526_">
+		<path id="RightQuarterPanel_00000041287781479590496500000009652507730820559496_" class="st0" d="M430.9,39.4l101.3,1.8
+			c3.9,18.7,8.7,37.1,30.9,49.5c22.3,7.2,38.7,2.9,52-7.3l49.7,7.3l25,11c-11.3,6.2-21.2,12.2-25,17.1c3.5,7.5,14.5,8.9,32.1,5.1
+			c5.1-2.6,7.9-6.2,9.7-10.2l5.3,1.2c-2.5,5.5-5.8,9.9-9.5,13.6l-39.2,7.1l-73.7,27.8c-47.4,18.8-102.3,22.2-158.6,22.7v-5.2V39.4z"
+			/>
+		<path id="RightFender_00000056393795121541653080000004126238519834882744_" class="st0" d="M256.5,127.5l12.4,0.6l6.9,5.3
+			l10.6-1.2l-9.9-9.3c-2.9-3.7-5-8-5.9-13.4c-0.5-24.8-0.1-48.9,2.4-72.7h-35.1c-1.1,27.3-13.1,44.6-33.9,54
+			c-15.1,4.9-28.8,3.8-41.4-2l-7.1,2l-17.3,4.1l7.1,9.1v2.4l95,14.4l14.4,4.3L256.5,127.5z"/>
+		<path id="RightFrontDoor_00000170279627032003430220000005870784083576744073_" class="st0" d="M286.5,132.2l-9.9-9.3
+			c-3.1-4-5.1-8.4-5.9-13.4c-0.7-24.4,0.1-48.6,2.4-72.7l170.9,2.4c-6.9,7.1-3.8,39.6-1.4,70.4l3.8,18.9l10.2,52.5
+			C406.2,181.9,326.4,175.8,286.5,132.2z"/>
+		<path id="RearLeftDoorWindow_00000101817450099241879700000005195746607150459529_" class="st1" d="M456.5,134l7.9,41.8
+			c60.2-5,88.6-19.4,105.3-41.8H456.5z"/>
+		<path id="FrontRightDoorWindow_00000131332155486989964840000017298930522735541394_" class="st1" d="M306.5,139.3v-12l126.9,6.1
+			l12.2,44.5C403.4,178.7,341.9,165.5,306.5,139.3z"/>
+		<path id="RightFrontStruts_00000107569010222324105720000012359571831990570648_" class="st0" d="M286.3,132.2
+			c46.5,31.4,85.1,46.7,144.5,48.8v5.2c-60.2,1.8-101.5-11.8-155-52.8L286.3,132.2z"/>
+		<path id="RightTailLight_00000181060058817419171560000010132741519101626296_" class="st3" d="M689.8,101.7
+			c-10.9,5.8-20.1,11.5-25,17.1c3.7,7.2,14,9.1,32.1,5.1c4.1-1.7,7.1-5.4,9.7-10.2l14.1-21.5C712,92.5,701.3,96.4,689.8,101.7z"/>
+		<path id="TrunkLid_00000140713953946529191660000013825115534490372502_" class="st0" d="M663.2,135.6l39.2-7.1
+			c3.9-3.9,7.1-8.4,9.5-13.6l-5.3-1.2l14.2-21.4l2.5,1c-2.1,7.8-3.3,15.5-3.5,23.1l3.5,3l-8.9,14.6l-52.6,8.5l-31.7,5.6L663.2,135.6
+			z"/>
+		<path id="RearBumper_00000140000888696361704660000012903417609886501014_" class="st0" d="M664.8,90.6l25,11
+			c10.4-4.7,20.7-9,31-9.5l2.5,1c2.5-5.6,5.8-10.5,10-14.7l-0.1-21.3c0,0-7.2-1.6-15.2-11.5s-25.3-10.8-25.3-10.8l-54.8-6.5
+			c-1.3,22.8-8.1,41.8-22.9,55.2L664.8,90.6z"/>
+		<path id="FrontBumper_00000098183681057904546450000017461533999279247509_" class="st0" d="M162.6,88.6
+			c-21-10.5-30.7-33.2-28.2-69.2c-56.3,0-40.8,6.1-51,8.9l-5.1,2.1c-0.5,0.3-0.5,1,0,1.2l7.1,3.1l-3.9,14.7
+			c-0.7,2.5-2.9,4.2-5.5,4.2h-2.3v8.7l4.2,2.2c1.1,0.4,1.9,1.2,2.4,2.3l14.5,31.3l6.5,1c-4.6-5-9.7-14.5-14.8-24.4l2.6-2
+			c18.2,4.7,34.5,12.1,49.1,22.1L162.6,88.6z"/>
+		<path id="LeftHeadlight_00000147902579902397956850000000902177452349873586_" class="st3" d="M145.3,106.4l-0.1-2.5l-7.1-9.1
+			c-12.6-8.7-28-16.5-49.1-22.1l-2.6,2c4.6,9.4,9.4,18,14.8,24.4L145.3,106.4L145.3,106.4z"/>
+		<path id="Windshield_00000158729311297034241490000014338102885046512552_" class="st1" d="M268.9,128.2l-12.5-0.6
+			c0,0-3.6,1.2-5,1.7c41.9,34.6,91,48.2,133.3,54.6C355.6,179.3,324.1,171.3,268.9,128.2z"/>
+		<path id="Hood_00000067959218144696547240000015771915814754952090_" class="st0" d="M254.8,125l-14.4-4.3l-95-14.4L101.3,99
+			l-6.5-1l0,0c0.9,1.8,0.1,4.1-1.9,4.8c-1,0.4-2.2,0.8-3.6,1.1c41.9,18.3,158.3,26.7,158.3,26.7l8.9-3.1L254.8,125z"/>
+		<path id="Grille_00000031907065447900344200000017955701465952260238_" class="st3" d="M78.3,64.7l1.9,2.1l14.5,31.3l0,0
+			c0.8,2.1-0.4,4.4-2.5,5l-3,0.9l0,0c-2.6,0-4.9-1.4-6.1-3.7l-0.6-1.2l-8.9-29.5c-0.5-1.7-0.6-3.6-0.3-5.4l0.3-1.9L78.3,64.7z"/>
+		<path id="FrontBumperGrille_00000070825452932856681830000015970357831597256592_" class="st3" d="M73.6,53.7h2.1
+			c2.6,0,4.9-1.7,5.7-4.2l0,0l3.9-14.7l-7.1-3.1l-4.6,21.9V53.7z"/>
+		<path id="FrontBumperGrille_00000034080067792142550700000009671443657717037498_" class="st3" d="M95.5,41.7
+			c1.4-3.6,4.7-6.1,8.6-6.3l0,0l16.7-0.5c0,0-0.6-0.5,1.2,1.9s-3,18.1-7.7,20.9c-4.6,2.9-21.8-7.6-21.8-7.6L95.5,41.7z"/>
+		<path id="RearWindshield_00000178908503597085591230000003678360566749423547_" class="st1" d="M630,148.1l22.9-4
+			c-20.4,9.4-20.4,9.6-39,16.6c-12.4,4.6-41.7,11.9-65.4,15.1l0,0C567.7,173,600.7,159.7,630,148.1z"/>
+		<path id="LeftRockerPanels_00000137810164834419567650000017248204996206650503_" class="st0" d="M525.2,41.6L418,39.1l-145.1-2.4
+			h-35.1V23.9c110.5,1.2,212.4,1.5,294.4,0v17.3L525.2,41.6z"/>
+		<path id="LeftMirrorGlass_00000181772580496089493760000015655902729729203390_" class="st0" d="M298.6,132.2
+			c0,7.4,6,13.4,13.4,13.4h7.7c0,0,6.7-2.8,6.7-9.3s-2.8-8.9-2.8-8.9h-27.2c0,0-2.2,0.2-2.3,1.8C294,130.8,298.6,132.2,298.6,132.2
+			L298.6,132.2z"/>
+		<circle id="LeftFrontTier_00000170996382404962153550000002446794775226601141_" class="st4" cx="185.3" cy="45.4" r="44.8"/>
+		<circle id="LeftFrontWheelRim_00000010994951492515713110000008031271227787549059_" class="st0" cx="185.9" cy="45.4" r="34.9"/>
+		<circle id="LeftRearTier_00000046314126893423300120000001992725078342534317_" class="st4" cx="583.7" cy="46.5" r="44.8"/>
+		<circle id="LeftRearWheelRim_00000085246019999151385690000003611630426601869998_" class="st0" cx="584.2" cy="46.6" r="34.9"/>
+		<path id="LeftFrontDoorHandle_00000026122892822228664220000008869946904300360614_" class="st1" d="M438.6,117.2v0.3
+			c0,1.6-1.3,2.8-2.8,2.8h-20.9c-1.6,0-2.8-1.3-2.8-2.8v-0.3c0-1.6,1.3-2.8,2.8-2.8h20.9C437.3,114.4,438.5,115.6,438.6,117.2z"/>
+	</g>
+</g>
+<g id="lines">
+	<g id="line_00000124870016933380651920000008708107588223962549_">
+		<path d="M255.1,355.3c-56.3-5.2-111.9-16-166.8-29.5C142.8,339.6,200.2,349,255.1,355.3L255.1,355.3z"/>
+	</g>
+	<g id="line_00000083075241233689479990000011474749345725605038_">
+		<path d="M254.5,152.5c-56.1,6.1-111.5,17.2-166.2,30.4C142.7,170.1,199.6,157.1,254.5,152.5L254.5,152.5z"/>
+	</g>
+	<path id="Line" class="st5" d="M521.8,476.2c-135.7-3.7-212.4-1.8-269.7,3.1C349.9,479.2,446.9,479.6,521.8,476.2z"/>
+	<g id="line_00000145038393124334039480000012086880152957013146_">
+		<path d="M145.7,403.4c26.4-1,105-4.9,130-5.4c77,0.1,170.9,0,248.4-0.6c-77.7,0.7-171.2,0.9-248.4,0.9
+			c-24.7,0.6-104.2,4.6-130,5.6C145.7,403.9,145.7,403.4,145.7,403.4L145.7,403.4z"/>
+	</g>
+	<path id="Line_00000092445005565997294050000010407868722008732341_" class="st5" d="M521.6,32.6c-135.7,3.7-212.4,1.8-269.7-3.1
+		C349.8,29.6,446.8,29.2,521.6,32.6z"/>
+	<g id="line_00000016753525166611599110000009341923165955830929_">
+		<path d="M145.6,104.9c26.4,1,105,5,130,5.6c77,0,170.9,0.2,248.4,0.9c-77.7-0.6-171.2-0.7-248.4-0.6c-3.5,0.1-8.3-0.1-11.8-0.3
+			c-15.7-0.7-100.7-4.4-118.2-5.1C145.5,105.4,145.6,104.9,145.6,104.9L145.6,104.9z"/>
+	</g>
+	<path id="line_00000166648177573228338660000000924472976177295009_" class="st6" d="M799,325.8l-5.2-1.6c-2.7-0.8-4.5-3.3-4.5-6.1
+		v-14h3.4c3.5,0,6.4,2.8,6.4,6.4v15.3L799,325.8L799,325.8z"/>
+	<path id="line_00000149366750344463589700000013764701679988300725_" class="st6" d="M796.4,343.4l-7.2-3.5v-13.6
+		c0-1.7,1.6-2.9,3.3-2.4l6.5,2l1,15.1C800.2,342.9,798.2,344.3,796.4,343.4z"/>
+	<path id="line_00000123410161792863915420000002246311373849933964_" class="st6" d="M799,181.5l-5.2,1.6c-2.7,0.8-4.5,3.3-4.5,6.1
+		v14h3.4c3.5,0,6.4-2.8,6.4-6.4v-15.3L799,181.5L799,181.5z"/>
+	<path id="line_00000031176989960517848000000011171370986281161370_" class="st6" d="M796.4,163.9l-7.2,3.5V181
+		c0,1.7,1.6,2.9,3.3,2.4l6.5-2l1.1-15.1C800.2,164.4,798.2,163.1,796.4,163.9z"/>
+	<path id="line_00000080207286016230716560000013378871073611439032_" class="st5" d="M814.2,349.4l-11.1,0.7
+		c-12.3,0.8-22.7-9-22.7-21.3v-23.5V203.8V177c0-11.8,9.6-21.4,21.4-21.4h16"/>
+	<path id="line_00000065779103243725839520000013883661984020776874_" class="st5" d="M770.7,133.7l-2.6,3
+		c-2.7,3.1-4.2,7.1-4.2,11.2v211.7c0,5.4,2.5,10.4,6.9,13.7l0,0"/>
+	<path id="line_00000150099859748616728950000006313043616843817366_" class="st5" d="M721.7,205.3l3.7-4.5l19.9,11
+		c5.8,25.8,5,53.3,0,82l-18.7,10.4l-4.9-4.3V205.3z"/>
+</g>
+	<g id="markers-container"></g>
+</svg>

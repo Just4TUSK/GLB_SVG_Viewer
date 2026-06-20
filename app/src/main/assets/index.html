@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GLB Model Viewer (Three.js)</title>
+    <script type="importmap">
+        {
+          "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+          }
+        }
+    </script>
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background: transparent;
+        }
+
+        #debug-panel {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.85);
+            color: white;
+            padding: 10px;
+            z-index: 10000;
+            font-family: monospace;
+            font-size: 13px;
+            border-radius: 4px;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+<div id="debug-panel">Waiting for model...</div>
+
+<script type="module">
+    import {
+        Scene, PerspectiveCamera, WebGLRenderer, Vector2, Vector3, Box3, Raycaster,
+        SphereGeometry, MeshBasicMaterial, Mesh, PMREMGenerator, ACESFilmicToneMapping, SRGBColorSpace
+    } from 'three';
+    import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
+    import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+    import {RoomEnvironment} from 'three/addons/environments/RoomEnvironment.js';
+
+    /**
+     * Распределяет свойства материалов для элементов модели.
+     */
+    const MaterialPresets = {
+        technicalRegex: /(carpaint|body|sedan|suv|wagon|convertible|paint|material|glass|chrome|plastic|metal|default|texture|mesh|geometry|node|object|__)/i,
+        glass: /(glass|window|headlight|windshield|mirror)/i,
+        interior: /(seat|interior|salon|leather|plastic|dashboard|carpet)/i,
+        paint: /(carpaint|paint|hood|door|fender|roof)/i,
+        paintMat: /(paint|color|body)/i,
+        metal: /(chrome|metal|wheel|rim|silver)/i,
+
+        /**
+         * @param {THREE.Object3D} node - Текущий узел (меш) 3D модели
+         * @param {THREE.Material} mat - Материал, привязанный к этому мешу
+         */
+        apply(node, mat) {
+            const nodeName = (node.name || "").toLowerCase();
+            const matName = (mat.name || "").toLowerCase();
+
+            if (this.glass.test(nodeName) || this.glass.test(matName)) {
+                mat.roughness = 0.0;
+                mat.metalness = 0.1;
+                mat.transparent = true;
+                mat.opacity = mat.opacity < 1.0 ? mat.opacity : 0.3;
+            }
+            else if (this.interior.test(nodeName) || this.interior.test(matName)) {
+                mat.roughness = 0.85;
+                mat.metalness = 0.0;
+                if (mat.clearcoat !== undefined) mat.clearcoat = 0.0;
+            }
+            else if (this.paint.test(nodeName) || this.paintMat.test(matName)) {
+                mat.roughness = 0.15;
+                mat.metalness = 0.1;
+                if (mat.clearcoat !== undefined) {
+                    mat.clearcoat = 1.0;
+                    mat.clearcoatRoughness = 0.05;
+                }
+            }
+            else if (this.metal.test(nodeName) || this.metal.test(matName)) {
+                mat.roughness = 0.05;
+                mat.metalness = 1.0;
+            }
+        }
+    };
+
+    /**
+     * Отвечает за создание, отрисовку и удаление маркеров.
+     */
+    class MarkerManager {
+        constructor() {
+            this.activeMarkers = [];
+            this.geometry = new SphereGeometry(0.08, 12, 12);
+            this.material = new MeshBasicMaterial({color: 0xff0000, toneMapped: false});
+        }
+
+        /**
+         * Создает маркер в локальных координатах модели.
+         */
+        createMarker(model, worldPoint, id) {
+            const marker = new Mesh(this.geometry, this.material);
+            marker.name = "damage_marker";
+            marker.userData = {markerId: id};
+            marker.renderOrder = 999;
+
+            const localPoint = worldPoint.clone();
+            model.worldToLocal(localPoint);
+            marker.position.copy(localPoint);
+
+            model.add(marker);
+            this.activeMarkers.push({id, parentContainer: model, markerObject: marker});
+        }
+
+        /**
+         * Удаляет маркер со сцены по его ID.
+         */
+        removeMarker(id) {
+            const index = this.activeMarkers.findIndex(m => m.id === id);
+            if (index !== -1) {
+                const item = this.activeMarkers[index];
+                item.parentContainer.remove(item.markerObject);
+                this.activeMarkers.splice(index, 1);
+            }
+        }
+
+        /**
+         * Полная очистка всех маркеров.
+         */
+        clearAll() {
+            this.activeMarkers.forEach(item => {
+                item.parentContainer.remove(item.markerObject);
+            });
+            this.activeMarkers = [];
+        }
+
+        /**
+         * Отрисовка массива маркеров.
+         */
+        highlightMarker(model, markers) {
+            if (!markers) return;
+            const data = typeof markers === 'string' ? JSON.parse(markers) : markers;
+            const array = Array.isArray(data) ? data : [data];
+
+            array.forEach(m => {
+                const worldPoint = new Vector3(parseFloat(m.x), parseFloat(m.y), parseFloat(m.z));
+                this.createMarker(model, worldPoint, m.id || `marker_${Date.now()}_${Math.floor(Math.random() * 100)}`);
+            });
+        }
+    }
+
+    /**
+     * Загружает .glb файл, вычисляет его физические границы
+     * и строит карту деталей машины (partMap).
+     */
+    class ModelManager {
+        constructor(scene) {
+            this.scene = scene;
+            this.model = null;
+            this.bounds = null;
+            this.partMap = {};
+            this.loader = new GLTFLoader();
+        }
+
+        /**
+         * Поднимается вверх по дереву деталей, чтобы отбросить
+         * технические названия мешей.
+         */
+        getPartName(object) {
+            let current = object;
+            let topPart = null;
+
+            while (current) {
+                if (current === this.model || current.parent === this.scene || current.parent === null) break;
+                if (current.name) {
+                    const isTechnical = MaterialPresets.technicalRegex.test(current.name);
+                    if (!isTechnical) {
+                        topPart = current;
+                        break;
+                    } else if (!topPart) {
+                        topPart = current;
+                    }
+                }
+                current = current.parent;
+            }
+
+            const finalNode = topPart || object;
+            return (finalNode.name === "Scene_Collection" || finalNode.name === "Scene")
+                ? (object.name || "unnamed")
+                : (finalNode.name || "unnamed");
+        }
+
+        /**
+         * Сканирует загруженную модель, заполняет карту деталей partMap.
+         */
+        processModelNodes() {
+            this.partMap = {};
+            this.model.traverse(node => {
+                if (node.isMesh && node.material) {
+                    const materials = Array.isArray(node.material) ? node.material : [node.material];
+                    materials.forEach(mat => {
+                        if (mat.isMeshStandardMaterial) MaterialPresets.apply(node, mat);
+                    });
+                }
+
+                if (node.name && node !== this.model) {
+                    const lowName = node.name.toLowerCase().trim();
+                    if (lowName !== "scene_collection" && lowName !== "scene") {
+                        const cleanKey = lowName.replace(/[\s_]/g, '');
+                        if (node.isMesh || node.type === "Group") {
+                            this.partMap[cleanKey] = node;
+
+                            if (/(carpaint|paint|material|glass)/i.test(lowName) && node.parent?.name) {
+                                const parentKey = node.parent.name.toLowerCase().replace(/[\s_]/g, '');
+                                if (parentKey !== "scene" && parentKey !== "scene_collection") {
+                                    this.partMap[parentKey] = node.parent;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        /**
+         * Главный метод загрузки файла.
+         */
+        load(url, onProgress, onSuccess, onError) {
+            if (this.model) this.scene.remove(this.model);
+
+            this.loader.load(url, (gltf) => {
+                this.model = gltf.scene;
+                this.scene.add(this.model);
+                this.model.updateMatrixWorld(true);
+
+                const box = new Box3().setFromObject(this.model);
+                this.bounds = {
+                    minX: box.min.x, maxX: box.max.x,
+                    minY: box.min.y, maxY: box.max.y,
+                    minZ: box.min.z, maxZ: box.max.z,
+                    center: box.getCenter(new Vector3()),
+                    sizeX: box.max.x - box.min.x,
+                    sizeY: box.max.y - box.min.y,
+                    sizeZ: box.max.z - box.min.z
+                };
+
+                this.processModelNodes();
+                onSuccess(this.model, this.bounds);
+            }, onProgress, onError);
+        }
+    }
+
+    /**
+     * Класс отвечающий за конфигурацию луча и его проецирование на модель.
+     */
+    class DamageProjector {
+        /**
+         * В зависимости от ракурса рассчитывает
+         * начальную точку луча и вектор его направления относительно габаритов машины.
+         */
+        static getRayConfiguration(damage, bounds) {
+            let localX = 0, localY = 0, localZ = 0;
+            let rayDirection = new Vector3();
+            // Данные математические расчёты требуют доработки
+            // для коректного отображения маркеров направление луча было смещено
+            // по У на -0.2 для передней и задней части модели
+            switch (damage.viewType) {
+                case "top":
+                    localZ = bounds.minZ + (1 - damage.nx_2d) * bounds.sizeZ;
+                    localX = bounds.minX + damage.ny_2d * bounds.sizeX;
+                    localY = bounds.maxY + 1.0;
+                    rayDirection.set(0, -1, 0);
+                    break;
+                case "left":
+                    localZ = bounds.minZ + (1 - damage.nx_2d) * bounds.sizeZ;
+                    localY = bounds.minY + (1 - damage.ny_2d) * bounds.sizeY;
+                    localX = bounds.maxX + 1.0;
+                    rayDirection.set(-1, 0, 0);
+                    break;
+                case "right":
+                    localZ = bounds.minZ + (1 - damage.nx_2d) * bounds.sizeZ;
+                    localY = bounds.minY + damage.ny_2d * bounds.sizeY;
+                    localX = bounds.minX - 1.0;
+                    rayDirection.set(1, 0, 0);
+                    break;
+                case "front":
+                    localX = bounds.minX + damage.ny_2d * bounds.sizeX;
+                    localY = bounds.minY + damage.nx_2d * bounds.sizeY;
+                    localZ = bounds.maxZ + 1.0;
+                    rayDirection.set(0, -0.2, -1);
+                    break;
+                case "back":
+                    localX = bounds.minX + damage.ny_2d * bounds.sizeX;
+                    localY = bounds.minY + (1 - damage.nx_2d) * bounds.sizeY;
+                    localZ = bounds.minZ - 1.0;
+                    rayDirection.set(0, -0.2, 1);
+                    break;
+                default:
+                    return null;
+            }
+            return {origin: new Vector3(localX, localY, localZ), direction: rayDirection};
+        }
+
+        /**
+         * Выполняет проецирование и возвращает итоговую локальную точку.
+         */
+        static project(damage, modelManager) {
+            const bounds = modelManager.bounds;
+            const model = modelManager.model;
+
+            const config = this.getRayConfiguration(damage, bounds);
+            if (!config) return null;
+
+            const rayOriginWorld = config.origin.clone();
+            model.localToWorld(rayOriginWorld);
+
+            const worldDirection = config.direction.clone().transformDirection(model.matrixWorld);
+            const raycaster = new Raycaster(rayOriginWorld, worldDirection.normalize());
+
+            const cleanKey = damage.partName.toLowerCase().replace(/[\s_]/g, '');
+            let targetMesh = modelManager.partMap[cleanKey];
+
+            if (!targetMesh) {
+                model.traverse(node => {
+                    if (!targetMesh && node.name?.toLowerCase().replace(/[\s_]/g, '').includes(cleanKey)) {
+                        targetMesh = node;
+                    }
+                });
+            }
+
+            let finalWorldPoint = new Vector3();
+            let hitFound = false;
+
+            if (targetMesh) {
+                const intersectsTarget = raycaster.intersectObjects([targetMesh], true);
+                if (intersectsTarget.length > 0) {
+                    finalWorldPoint.copy(intersectsTarget[0].point);
+                    hitFound = true;
+                }
+            }
+
+            const intersectsModel = raycaster.intersectObjects([model], true);
+            if (intersectsModel.length > 0) {
+                finalWorldPoint.copy(intersectsModel[0].point);
+                hitFound = true;
+            }
+
+            if (!hitFound) {
+                finalWorldPoint.set(config.origin.x, damage.viewType === "top"
+                                    ? bounds.maxY : config.origin.y, config.origin.z);
+                model.localToWorld(finalWorldPoint);
+            }
+
+            const localPoint = finalWorldPoint.clone();
+            model.worldToLocal(localPoint);
+            return localPoint;
+        }
+    }
+
+    let scene, camera, renderer, controls;
+    let modelManager, markerManager;
+    let pressedObject = null;
+    let pointerDownPosition = new Vector2();
+    let raycaster = new Raycaster();
+    let mouse = new Vector2();
+    let currentDamageIds = [];
+
+    const debugPanel = document.getElementById('debug-panel');
+
+    function initThree() {
+        scene = new Scene();
+        scene.background = null;
+
+        camera = new PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 2.8, 8);
+        scene.add(camera);
+
+        renderer = new WebGLRenderer({
+            antialias: true,
+            alpha: true,
+            powerPreference: "high-performance",
+            precision: "mediump"
+        });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1));
+        renderer.toneMapping = ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.4;
+        renderer.outputColorSpace = SRGBColorSpace;
+        document.body.appendChild(renderer.domElement);
+
+        loadEnvironment();
+
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.1;
+        controls.target.set(0, 1, 0);
+
+        modelManager = new ModelManager(scene);
+        markerManager = new MarkerManager();
+
+        window.addEventListener('resize', onResize);
+        onResize();
+        animate();
+    }
+
+    /**
+     * Генерируется оосвещение.
+     */
+    function loadEnvironment() {
+        const pmremGenerator = new PMREMGenerator(renderer);
+        pmremGenerator.compileEquirectangularShader();
+        const roomEnv = new RoomEnvironment(renderer);
+        scene.environment = pmremGenerator.fromScene(roomEnv).texture;
+
+        roomEnv.dispose();
+        pmremGenerator.dispose();
+    }
+
+    /**
+     * Вызывается из Android для загрузки файла модели.
+     */
+    function loadModel(modelData) {
+        debugPanel.innerText = "Loading model...";
+        modelManager.load(
+            modelData,
+            (progress) => {
+                debugPanel.innerText =
+                    progress.total > 0 ? `Loading: ${Math.round(progress.loaded /
+                        progress.total * 100)}%` : "Loading...";
+            },
+            (model, bounds) => {
+                controls.target.copy(bounds.center);
+                controls.update();
+                debugPanel.innerText = "Model loaded successfully";
+
+                if (currentDamageIds.length > 0) {
+                    load2DDamageTo3D(currentDamageIds);
+                }
+            },
+            (error) => {
+                console.error(error);
+                debugPanel.innerText = "Error loading model";
+            }
+        );
+    }
+
+    /**
+     * Конвертация массива 2D-координат повреждений в 3D маркеры.
+     */
+    function load2DDamageTo3D(dataFrom2D) {
+        try {
+            let damages = typeof dataFrom2D === 'string' ? JSON.parse(dataFrom2D) : dataFrom2D;
+            if (!Array.isArray(damages)) damages = [damages];
+
+            if (!modelManager.model || !modelManager.bounds) {
+                currentDamageIds = dataFrom2D;
+                return;
+            }
+
+            const markersFor3d = [];
+
+            damages.forEach(damage => {
+                const has2DCords = damage.nx_2d !== undefined && damage.ny_2d !== undefined && (damage.nx_2d !== 0 || damage.ny_2d !== 0);
+
+                if (!has2DCords) {
+                    if (damage.x && damage.y && damage.z) {
+                        markersFor3d.push({id: damage.id, x: damage.x, y: damage.y, z: damage.z});
+                    }
+                    return;
+                }
+
+                const localPoint = DamageProjector.project(damage, modelManager);
+                if (localPoint) {
+                    markersFor3d.push({id: damage.id, x: localPoint.x, y: localPoint.y, z: localPoint.z});
+                    debugPanel.innerText = `Calculated 3D coordinates for: ${damage.partName}`;
+                }
+            });
+
+            if (markersFor3d.length > 0) {
+                highlightDamagedParts(markersFor3d);
+            }
+        } catch (e) {
+            console.error("Projection error 2D to 3D:", e);
+        }
+    }
+
+    function highlightDamagedParts(markers) {
+        if (!modelManager.model) {
+            currentDamageIds = markers;
+            return;
+        }
+        markerManager.highlightMarker(modelManager.model, markers);
+    }
+
+    /**
+     * Обработка клика по сцене.
+     */
+    function handleSceneClick(event) {
+        if (!modelManager.model) return;
+
+        mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+        mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+        raycaster.setFromCamera(mouse, camera);
+
+        const intersects = raycaster.intersectObjects(scene.children, true);
+        if (intersects.length === 0) return;
+
+        const intersection = intersects[0];
+        const clickedObject = intersection.object;
+
+        if (clickedObject.name === "damage_marker") {
+            const targetId = clickedObject.userData.markerId;
+            markerManager.removeMarker(targetId);
+
+            if (typeof elementClicked !== "undefined"?.postMessage) {
+                elementClicked.postMessage(JSON.stringify({action: "marker_removed", id: targetId}));
+            }
+            return;
+        }
+
+        let isModelMesh = false;
+        let currentCheck = clickedObject;
+        while (currentCheck) {
+            if (currentCheck === modelManager.model) {
+                isModelMesh = true;
+                break;
+            }
+            currentCheck = currentCheck.parent;
+        }
+        if (!isModelMesh) return;
+
+        const partName = modelManager.getPartName(clickedObject);
+        const localRootPoint = intersection.point.clone();
+        modelManager.model.worldToLocal(localRootPoint);
+
+        const newMarkerId = `marker_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+        const bounds = modelManager.bounds;
+
+        const eventData = {
+            action: "marker_added",
+            id: newMarkerId,
+            partName: partName,
+            x: localRootPoint.x, y: localRootPoint.y, z: localRootPoint.z,
+            // Вычисляем процентное (0.0 - 1.0) положение маркера (для синхронизации обратно в 2D)
+            nx: (localRootPoint.x - bounds.minX) / bounds.sizeX,
+            ny: (localRootPoint.y - bounds.minY) / bounds.sizeY,
+            nz: (localRootPoint.z - bounds.minZ) / bounds.sizeZ
+        };
+
+        debugPanel.innerText = `Added marker [${newMarkerId}] on: ${partName}`;
+
+        if (typeof elementClicked !== "undefined"?.postMessage) {
+            elementClicked.postMessage(JSON.stringify(eventData));
+        }
+
+        markerManager.createMarker(modelManager.model, intersection.point, newMarkerId);
+    }
+
+    function onPointerDown(event) {
+        if (!modelManager.model) return;
+        mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+        mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+        pointerDownPosition.set(event.clientX, event.clientY);
+
+        raycaster.setFromCamera(mouse, camera);
+        const intersects = raycaster.intersectObjects(scene.children, true);
+        if (intersects.length > 0) pressedObject = intersects[0].object;
+    }
+
+    function onPointerUp(event) {
+        if (!pressedObject) return;
+        const moveDistance = Math.hypot(event.clientX - pointerDownPosition.x,
+            event.clientY - pointerDownPosition.y);
+
+        if (moveDistance < 8) {
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+
+            const intersects = raycaster.intersectObjects(scene.children, true);
+            if (intersects.length > 0 && intersects[0].object === pressedObject) {
+                handleSceneClick(event);
+            }
+        }
+        pressedObject = null;
+    }
+
+    function onResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+        controls.update();
+        renderer.render(scene, camera);
+    }
+
+    initThree();
+    const canvas = renderer.domElement;
+    canvas.addEventListener('pointerdown', onPointerDown);
+    canvas.addEventListener('pointerup', onPointerUp);
+    canvas.addEventListener('pointerleave', () => {
+        pressedObject = null;
+    });
+
+    window.loadModel = loadModel;
+    window.load2DDamageTo3D = load2DDamageTo3D;
+    window.highlightDamagedParts = highlightDamagedParts;
+    window.removeMarkerById = (id) => markerManager.removeMarker(id);
+    window.clearAllMarkers = () => markerManager.clearAll();
+</script>
+</body>
+</html>
