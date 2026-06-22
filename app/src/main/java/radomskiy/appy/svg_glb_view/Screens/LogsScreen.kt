@@ -51,7 +51,7 @@ fun LogsScreen(viewModel: LazyColumnViewModel){
                         contentAlignment = Alignment.Center
                     ){
                         Text(
-                            "${item.nx_2d}, ${item.ny_2d}",
+                            item.partName,
                             modifier = Modifier
                                 .padding(5.dp),
                             fontSize = 32.sp,

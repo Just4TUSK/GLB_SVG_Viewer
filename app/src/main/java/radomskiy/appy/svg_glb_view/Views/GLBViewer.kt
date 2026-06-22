@@ -30,14 +30,11 @@ fun GLBViewer(
     var isPageLoaded by remember { mutableStateOf(false) }
 
     val assetLoader = remember {
-//        val dataDir = File(context.filesDir, "models").apply {
-//            if(!exists()) mkdirs()
-//        }
         WebViewAssetLoader.Builder()
-            .addPathHandler("/assets/", WebViewAssetLoader
-                .AssetsPathHandler(context))
-//            .addPathHandler("/models-data/", WebViewAssetLoader
-//                .InternalStoragePathHandler(context, dataDir))
+            .addPathHandler(
+                "/assets/", WebViewAssetLoader
+                    .AssetsPathHandler(context)
+            )
             .build()
     }
     val jsArray = Json.encodeToString(damageIds)
@@ -52,13 +49,8 @@ fun GLBViewer(
 
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
-
-            settings.mediaPlaybackRequiresUserGesture = true
-
-            settings.allowFileAccess = true
             settings.allowContentAccess = true
 
-            settings.loadsImagesAutomatically = true
 
             webViewClient = object : WebViewClient() {
                 override fun shouldInterceptRequest(
@@ -67,6 +59,7 @@ fun GLBViewer(
                 ): WebResourceResponse? {
                     return assetLoader.shouldInterceptRequest(request?.url ?: return null)
                 }
+
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
                     isPageLoaded = true
@@ -80,16 +73,7 @@ fun GLBViewer(
 
     LaunchedEffect(model, damageIds, isPageLoaded) {
         if (isPageLoaded && model.isNotEmpty()) {
-//            val dataDir = File(context.filesDir, "models").apply {
-//                if (!exists()) mkdirs()
-//            }
-//            val tempFile = File(dataDir, "temp_model.glb")
-
             try {
-//                context.contentResolver.openInputStream(model)?.use { input ->
-//                    tempFile.outputStream().use { output -> input.copyTo(output) }
-//                }
-
                 val virtualUrl = "https://appassets.androidplatform.net/assets/3D/$model.glb"
 
                 webView.evaluateJavascript("loadModel('$virtualUrl');", null)
