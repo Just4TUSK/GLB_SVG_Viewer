@@ -71,21 +71,18 @@
                 mat.metalness = 0.1;
                 mat.transparent = true;
                 mat.opacity = mat.opacity < 1.0 ? mat.opacity : 0.3;
-            }
-            else if (this.interior.test(nodeName) || this.interior.test(matName)) {
+            } else if (this.interior.test(nodeName) || this.interior.test(matName)) {
                 mat.roughness = 0.85;
                 mat.metalness = 0.0;
                 if (mat.clearcoat !== undefined) mat.clearcoat = 0.0;
-            }
-            else if (this.paint.test(nodeName) || this.paintMat.test(matName)) {
+            } else if (this.paint.test(nodeName) || this.paintMat.test(matName)) {
                 mat.roughness = 0.15;
                 mat.metalness = 0.1;
                 if (mat.clearcoat !== undefined) {
                     mat.clearcoat = 1.0;
                     mat.clearcoatRoughness = 0.05;
                 }
-            }
-            else if (this.metal.test(nodeName) || this.metal.test(matName)) {
+            } else if (this.metal.test(nodeName) || this.metal.test(matName)) {
                 mat.roughness = 0.05;
                 mat.metalness = 1.0;
             }
@@ -294,13 +291,13 @@
                     localX = bounds.minX + damage.ny_2d * bounds.sizeX;
                     localY = bounds.minY + damage.nx_2d * bounds.sizeY;
                     localZ = bounds.maxZ + 1.0;
-                    rayDirection.set(0, -0.2, -1);
+                    rayDirection.set(0, 0, -1);
                     break;
                 case "back":
                     localX = bounds.minX + damage.ny_2d * bounds.sizeX;
                     localY = bounds.minY + (1 - damage.nx_2d) * bounds.sizeY;
                     localZ = bounds.minZ - 1.0;
-                    rayDirection.set(0, -0.2, 1);
+                    rayDirection.set(0, 0, 1);
                     break;
                 default:
                     return null;
@@ -312,17 +309,8 @@
          * Выполняет проецирование и возвращает итоговую локальную точку.
          */
         static project(damage, modelManager) {
-            const bounds = modelManager.bounds;
+            let bounds = modelManager.bounds;
             const model = modelManager.model;
-
-            const config = this.getRayConfiguration(damage, bounds);
-            if (!config) return null;
-
-            const rayOriginWorld = config.origin.clone();
-            model.localToWorld(rayOriginWorld);
-
-            const worldDirection = config.direction.clone().transformDirection(model.matrixWorld);
-            const raycaster = new Raycaster(rayOriginWorld, worldDirection.normalize());
 
             const cleanKey = damage.partName.toLowerCase().replace(/[\s_]/g, '');
             let targetMesh = modelManager.partMap[cleanKey];
@@ -334,6 +322,19 @@
                     }
                 });
             }
+
+            if (/(light|grille|bumper|trunklid)/i.test(cleanKey)) {
+                bounds = this.getSmallPartBbox(model, targetMesh)
+            }
+
+            const config = this.getRayConfiguration(damage, bounds);
+            if (!config) return null;
+
+            const rayOriginWorld = config.origin.clone();
+            model.localToWorld(rayOriginWorld);
+
+            const worldDirection = config.direction.clone().transformDirection(model.matrixWorld);
+            const raycaster = new Raycaster(rayOriginWorld, worldDirection.normalize());
 
             let finalWorldPoint = new Vector3();
             let hitFound = false;
@@ -354,13 +355,33 @@
 
             if (!hitFound) {
                 finalWorldPoint.set(config.origin.x, damage.viewType === "top"
-                                    ? bounds.maxY : config.origin.y, config.origin.z);
+                    ? bounds.maxY : config.origin.y, config.origin.z);
                 model.localToWorld(finalWorldPoint);
             }
 
             const localPoint = finalWorldPoint.clone();
             model.worldToLocal(localPoint);
             return localPoint;
+        }
+
+        static getSmallPartBbox(model, targetMesh){
+            let bounds;
+            const partBox = new Box3().setFromObject(targetMesh);
+
+            const minLocal = partBox.min.clone();
+            const maxLocal = partBox.max.clone();
+            model.worldToLocal(minLocal);
+            model.worldToLocal(maxLocal);
+
+            bounds = {
+                minX: Math.min(minLocal.x, maxLocal.x), maxX: Math.max(minLocal.x, maxLocal.x),
+                minY: Math.min(minLocal.y, maxLocal.y), maxY: Math.max(minLocal.y, maxLocal.y),
+                minZ: Math.min(minLocal.z, maxLocal.z), maxZ: Math.max(minLocal.z, maxLocal.z),
+                sizeX: Math.abs(maxLocal.x - minLocal.x),
+                sizeY: Math.abs(maxLocal.y - minLocal.y),
+                sizeZ: Math.abs(maxLocal.z - minLocal.z)
+            };
+            return bounds;
         }
     }
 
@@ -484,19 +505,11 @@
             });
 
             if (markersFor3d.length > 0) {
-                highlightDamagedParts(markersFor3d);
+                markerManager.highlightMarker(modelManager.model, markersFor3d);
             }
         } catch (e) {
             console.error("Projection error 2D to 3D:", e);
         }
-    }
-
-    function highlightDamagedParts(markers) {
-        if (!modelManager.model) {
-            currentDamageIds = markers;
-            return;
-        }
-        markerManager.highlightMarker(modelManager.model, markers);
     }
 
     /**
@@ -542,7 +555,14 @@
         modelManager.model.worldToLocal(localRootPoint);
 
         const newMarkerId = `marker_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
-        const bounds = modelManager.bounds;
+
+        let bounds = modelManager.bounds;
+        const cleanKey = partName.toLowerCase().replace(/[\s_]/g, '');
+        const targetMesh = modelManager.partMap[cleanKey];
+
+        if (/(light|grille|bumper|trunklid)/i.test(cleanKey)) {
+            bounds = DamageProjector.getSmallPartBbox(modelManager.model, targetMesh)
+        }
 
         const eventData = {
             action: "marker_added",
@@ -615,7 +635,6 @@
 
     window.loadModel = loadModel;
     window.load2DDamageTo3D = load2DDamageTo3D;
-    window.highlightDamagedParts = highlightDamagedParts;
     window.removeMarkerById = (id) => markerManager.removeMarker(id);
     window.clearAllMarkers = () => markerManager.clearAll();
 </script>

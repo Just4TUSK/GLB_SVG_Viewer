@@ -139,7 +139,38 @@ class SVGProjector {
         }
 
         const groupId = parentGroup.id.toLowerCase();
-        const bbox = parentGroup.getBBox();
+        let bbox;
+        if (damage.partName.includes("FrontBumperGrille")) {
+            const allGrilleParts = parentGroup.querySelectorAll(`[id*="FrontBumperGrille"]`);
+
+            if (allGrilleParts.length > 0) {
+                let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+                allGrilleParts.forEach(el => {
+                    if (typeof el.getBBox === 'function') {
+                        const b = el.getBBox();
+                        if (b.width === 0 && b.height === 0) return;
+                        if (b.x < minX) minX = b.x;
+                        if (b.y < minY) minY = b.y;
+                        if (b.x + b.width > maxX) maxX = b.x + b.width;
+                        if (b.y + b.height > maxY) maxY = b.y + b.height;
+                    }
+                });
+
+                bbox = {
+                    x: minX,
+                    y: minY,
+                    width: maxX - minX,
+                    height: maxY - minY
+                };
+            }
+        }
+
+        if (!bbox) {
+            const target = /(light|grille|bumper|trunklid)/i.test(damage.partName)
+            ? svgPart : parentGroup;
+            bbox = target.getBBox();
+        }
 
         let exactX = 0;
         let exactY = 0;
@@ -156,19 +187,9 @@ class SVGProjector {
         } else if (groupId.includes("front")) {
             exactX = bbox.x + damage.ny * bbox.width;
             exactY = bbox.y + damage.nx * bbox.height;
-
-            if (/(light|grille)/i.test(damage.partName)) {
-                exactX += 20;
-            }
-
         } else if (groupId.includes("back")) {
-            exactX = bbox.x + damage.ny * bbox.width;
+            exactX = bbox.x + (1 - damage.ny) * bbox.width;
             exactY = bbox.y + damage.nx * bbox.height;
-
-            if (/(light|trunklid)/i.test(damage.partName)) {
-                exactX -= 30;
-            }
-
         } else {
             console.warn("Unknown SVG view group orientation:", groupId);
             return null;
@@ -211,8 +232,8 @@ function load3DDamageToSVG(jsonFrom3D) {
             if (!has3DCords) {
                 if (damage.x !== undefined && damage.y !== undefined) {
                     markersForSVG.push({id: damage.id,
-                                        x: parseFloat(damage.x),
-                                        y: parseFloat(damage.y)});
+                        x: parseFloat(damage.x),
+                        y: parseFloat(damage.y)});
                 }
                 return;
             }
@@ -310,7 +331,7 @@ function initClickContainer() {
 
                     if (typeof elementClicked !== "undefined" && elementClicked.postMessage) {
                         elementClicked.postMessage(JSON.stringify({action: "marker_removed",
-                                                                   id: markerId}));
+                            id: markerId}));
                     }
                 }
             }
@@ -343,7 +364,38 @@ function initClickContainer() {
 
         if (parentGroup?.id) {
             const groupId = parentGroup.id.toLowerCase();
-            const bbox = parentGroup.getBBox();
+            let bbox;
+            if (cleanPartName.includes("FrontBumperGrille")) {
+                const allGrilleParts = parentGroup.querySelectorAll(`[id*="FrontBumperGrille"]`);
+
+                if (allGrilleParts.length > 0) {
+                    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+                    allGrilleParts.forEach(el => {
+                        if (typeof el.getBBox === 'function') {
+                            const b = el.getBBox();
+                            if (b.width === 0 && b.height === 0) return;
+                            if (b.x < minX) minX = b.x;
+                            if (b.y < minY) minY = b.y;
+                            if (b.x + b.width > maxX) maxX = b.x + b.width;
+                            if (b.y + b.height > maxY) maxY = b.y + b.height;
+                        }
+                    });
+
+                    bbox = {
+                        x: minX,
+                        y: minY,
+                        width: maxX - minX,
+                        height: maxY - minY
+                    };
+                }
+            }
+
+            if (!bbox) {
+                const target = /(light|grille|bumper|trunklid)/i.test(cleanPartName)
+                ? part.element : parentGroup;
+                bbox = target.getBBox();
+            }
 
             nx_2d = (svgP.x - bbox.x) / bbox.width;
             ny_2d = (svgP.y - bbox.y) / bbox.height;
